@@ -12,7 +12,7 @@ import "@openzeppelinUpgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
 import "./../../interfaces/ILBPair.sol";
 import "./../../interfaces/ILBRouter.sol";
 import "./../../interfaces/ILBToken.sol";
-import "./../../interfaces/IOracle.sol";
+import "./../../interfaces/IOracleHelper.sol";
 import "./../../interfaces/IStrategy.sol";
 import "./../../interfaces/IViewHelper.sol";
 
@@ -39,7 +39,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     ILBToken public receiptToken;
     IViewHelper public viewHelper;
 
-    IOracle public oracle;
+    IOracleHelper public oracle;
 
     uint256 public constant PRECISION = 10000;
 
@@ -111,7 +111,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     }
 
     function setOracle(address _oracle) external onlyOwner {
-        oracle = IOracle(_oracle);
+        oracle = IOracleHelper(_oracle);
     }
 
     function setWithdrawalFee(uint256 delay, uint256 value) external onlyOwner {
@@ -162,7 +162,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     }
 
     function getOraclePrice() public view returns (uint256 oraclePrice) {
-        oraclePrice = oracle.getPrice(tokenX);
+        oraclePrice = oracle.getPriceOfXInYUnits(tokenX, tokenY);
     }
 
     function getPriceFromActiveBin() public view returns (uint256 price) {
@@ -411,7 +411,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     ) internal {
         checkPrice(depositThreshold);
         harvest(msg.sender);
-        uint256 oraclePrice = oracle.getPrice(tokenX);
+        uint256 oraclePrice = oracle.getPriceOfXInYUnits(tokenX, tokenY);
         uint256 depositValueY = amountY;
         uint256 depositValueX = amountX * (oraclePrice / 10**18);
         uint256 shares = getSharesForDepositTokens(depositValueX + depositValueY, oraclePrice);
@@ -576,7 +576,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         if (_harvest) {
             harvest(msg.sender);
         }
-        uint256 oraclePrice = oracle.getPrice(tokenX);
+        uint256 oraclePrice = oracle.getPriceOfXInYUnits(tokenX, tokenY);
         uint256 neededShares = getSharesForDepositTokens(
             amountX * (oraclePrice / 10**18) + amountY,
             oraclePrice
