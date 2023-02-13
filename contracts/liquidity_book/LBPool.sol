@@ -491,14 +491,11 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         (, , uint256 activeId) = getPairInfos();
         if (respectRatio) {
             (uint256 reserveX, uint256 reserveY) = getTotalReserveForBin(activeId);
-            uint256 ratio = (reserveX *
-                getPriceFromActiveBin() *
-                10**IERC20Metadata(tokenY).decimals()) / // TODO : Add price here instead of 1
-                (reserveY * 10**IERC20Metadata(tokenX).decimals());
+            uint256 ratio = (reserveX * getPriceFromActiveBin()) / reserveY;
 
             (_deltaIds, _distributionX, _distributionY) = viewHelper
                 .computeDistributionToRespectRatio(
-                    amountX,
+                    (amountX * getPriceFromActiveBin()) / 1e18,
                     amountY,
                     ratio,
                     _deltaIds,

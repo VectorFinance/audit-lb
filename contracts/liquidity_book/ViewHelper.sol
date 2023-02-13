@@ -213,17 +213,19 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
             }
             finalDistributionY = _distributionY;
         } else {
-            uint256 amountYNeeded = (amountXNeeded * 10**18) / ratio;
+            uint256 amountYNeeded = ((amountX * (10**18 - distXOutsideActive)) / ratio);
             uint256 targetDistInActive = (amountYNeeded * 10**18) / amountY;
             uint256 remainingDist = 10**18 - targetDistInActive;
             uint256 totalDistYOutsideActive;
-            for (uint256 i; i < _deltaIds.length; i++) {
+            for (uint256 i = _deltaIds.length - 1; i >= 0; i--) {
                 finalIds[i] = _deltaIds[i];
                 uint256 newDistY;
                 if (_distributionY[i] > 0) {
                     if (_deltaIds[i] == 0) {
                         newDistY = targetDistInActive;
-                    } else if (i == 0) {} else {
+                    } else if (i == 0) {
+                        newDistY = remainingDist - totalDistYOutsideActive;
+                    } else {
                         newDistY = (_distributionY[i] * remainingDist) / distYOutsideActive;
                     }
                 }
@@ -233,8 +235,10 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
                 if (_deltaIds[i] != 0) {
                     totalDistYOutsideActive += newDistY;
                 }
+                if (i == 0) {
+                    break;
+                }
             }
-            finalDistributionY[0] += remainingDist - totalDistYOutsideActive;
             finalDistributionX = _distributionX;
         }
     }
