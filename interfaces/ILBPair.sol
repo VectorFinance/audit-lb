@@ -11,6 +11,22 @@ interface ILBPair {
         uint256 accTokenXPerShare;
         uint256 accTokenYPerShare;
     }
+    struct FeeParameters {
+        // 144 lowest bits in slot
+        uint16 binStep;
+        uint16 baseFactor;
+        uint16 filterPeriod;
+        uint16 decayPeriod;
+        uint16 reductionFactor;
+        uint24 variableFeeControl;
+        uint16 protocolShare;
+        uint24 maxVolatilityAccumulated;
+        // 112 highest bits in slot
+        uint24 volatilityAccumulated;
+        uint24 volatilityReference;
+        uint24 indexRef;
+        uint40 time;
+    }
 
     /// @dev Structure to store the debts of users
     /// - debtX: The tokenX's debt
@@ -127,6 +143,8 @@ interface ILBPair {
     function tokenX() external view returns (address);
 
     function tokenY() external view returns (address);
+
+    function feeParameters() external view returns (FeeParameters calldata);
 
     function totalSupply(uint256) external view returns (uint256);
 

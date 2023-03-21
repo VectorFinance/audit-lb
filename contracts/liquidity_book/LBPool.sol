@@ -7,18 +7,26 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelinUpgradeable/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelinUpgradeable/contracts/access/OwnableUpgradeable.sol";
 import "@openzeppelinUpgradeable/contracts/security/PausableUpgradeable.sol";
+import "@openzeppelinUpgradeable/contracts/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelinUpgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
 
-import "./../../interfaces/ILBPair.sol";
-import "./../../interfaces/ILBRouter.sol";
-import "./../../interfaces/ILBToken.sol";
-import "./../../interfaces/IOracleHelper.sol";
-import "./../../interfaces/IStrategy.sol";
-import "./../../interfaces/IViewHelper.sol";
+import "interfaces/IReceiptsHolder.sol";
+import "interfaces/ILBPair.sol";
+import "interfaces/ILBRouter.sol";
+import "interfaces/ILBToken.sol";
+import "interfaces/IOracleHelper.sol";
+import "interfaces/IStrategy.sol";
+import "interfaces/IViewHelper.sol";
 
 /// @title Locker
 /// @author Vector Team
-contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, PausableUpgradeable {
+contract LBPool is
+    Initializable,
+    ERC20Upgradeable,
+    OwnableUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable
+{
     using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.UintSet;
 
@@ -27,21 +35,16 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     uint256 public binStep;
 
     address public strategy;
-    uint256 public MANAGER_FEE;
 
-    address public protocolFeeRecipient;
-    uint256 public PROTOCOL_FEE;
-
-    uint256 public CALLER_FEE;
-
+    IReceiptsHolder public receiptsManager;
     ILBRouter public router;
     ILBPair public pair;
     ILBToken public receiptToken;
     IViewHelper public viewHelper;
 
     IOracleHelper public oracle;
-
     uint256 public constant PRECISION = 10000;
+    uint256 constant EPSILON = 1000;
 
     EnumerableSet.UintSet private depositedIds;
 
@@ -54,20 +57,25 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
 
     uint256 public swapMaxValue;
     uint256 public swapMinimumThreshold;
+    uint256 public deltaSwapSafeguard;
+    uint256 public lastSwap;
+    uint256 public delayBetweenSwaps;
 
     mapping(address => uint256) public lastDepositedTime;
 
-    event Deposit(address indexed user, uint256 amountX, uint256 amountY);
-    event Withdraw(address indexed user, uint256 amountX, uint256 amountY);
-    event Rebalance();
-    event SwapToken(
-        address inToken,
-        uint256 inTokenAmount,
-        address outToken,
-        uint256 outTokenAmount
-    );
-    event Harvest(address indexed user, uint256 amountX, uint256 amountY);
-    event FeeDistributed(address indexed user, uint256 amount, address token);
+    event SetDelayBetweenSwaps(uint256);
+    event SetDeltaSwapSafeguard(uint256);
+    event SetSwapMinimumThreshold(uint256);
+    event SetSwapMaxValue(uint256);
+    event SetSwapThreshold(uint256);
+    event SetAddLiquidityThreshold(uint256);
+    event SetDepositThreshold(uint256);
+    event SetStrategy(address);
+    event SetWithdrawalFee(uint256 delay, uint256 value);
+    event SetOracle(address);
+    event SetReceiptsManager(address);
+    event ParamsSet(int256[] _deltaIds, uint256[] _distributionX, uint256[] _distributionY);
+    event LiquidityRemoved(uint256[] ids, uint256[] receiptBalances);
     event LiquidityAdded(
         int256[] deltaIds,
         uint256[] distributionX,
@@ -75,12 +83,15 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         uint256 amountX,
         uint256 amountY
     );
-    event LiquidityRemoved(uint256[] ids, uint256[] receiptBalances);
-    event ParamsSet(int256[] _deltaIds, uint256[] _distributionX, uint256[] _distributionY);
-    event Log(uint256[] amountsX, uint256[] amountsY, uint256[] idsX, uint256[] idsY);
-
-    // TODO: Add events.
-    // TODO: Add event to keep track of strategist rewards
+    event SwapToken(
+        address inToken,
+        uint256 inTokenAmount,
+        address outToken,
+        uint256 outTokenAmount
+    );
+    event Rebalance();
+    event Withdrawal(address indexed user, uint256 amountX, uint256 amountY);
+    event Deposit(address indexed user, uint256 amountX, uint256 amountY);
 
     function __LBPool_init(
         address _tokenX,
@@ -93,6 +104,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         __Ownable_init();
         __ERC20_init("VLB", "VLB");
         __Pausable_init();
+        __ReentrancyGuard_init();
         router = ILBRouter(_router);
         tokenX = _tokenX;
         tokenY = _tokenY;
@@ -110,55 +122,60 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         _;
     }
 
+    function setReceiptsManager(address _receiptsManager) external onlyOwner {
+        receiptsManager = IReceiptsHolder(_receiptsManager);
+        emit SetReceiptsManager(_receiptsManager);
+    }
+
     function setOracle(address _oracle) external onlyOwner {
         oracle = IOracleHelper(_oracle);
+        emit SetOracle(_oracle);
     }
 
     function setWithdrawalFee(uint256 delay, uint256 value) external onlyOwner {
         withdrawalFee = value;
         withdrawalFeeDelay = delay;
+        emit SetWithdrawalFee(delay, value);
     }
 
     function setStrategy(address _strategy) external onlyOwner {
         strategy = _strategy;
-    }
-
-    function setProtocolFee(uint256 _value) external onlyOwner {
-        PROTOCOL_FEE = _value;
+        emit SetStrategy(strategy);
     }
 
     function setDepositThreshold(uint256 _value) external onlyOwner {
         depositThreshold = _value;
+        emit SetDepositThreshold(_value);
     }
 
     function setAddLiquidityThreshold(uint256 _value) external onlyOwner {
         addLiquidityThreshold = _value;
+        emit SetAddLiquidityThreshold(_value);
     }
 
     function setSwapThreshold(uint256 _value) external onlyOwner {
         swapThreshold = _value;
+        emit SetSwapThreshold(_value);
     }
 
     function setSwapMaxValue(uint256 _value) external onlyOwner {
         swapMaxValue = _value;
+        emit SetSwapMaxValue(_value);
     }
 
     function setSwapMinimumThreshold(uint256 _value) external onlyOwner {
         swapMinimumThreshold = _value;
+        emit SetSwapMinimumThreshold(_value);
     }
 
-    function setProtocolFeeRecipient(address _value) external onlyOwner {
-        protocolFeeRecipient = _value;
+    function setDeltaSwapSafeguard(uint256 _value) external onlyOwner {
+        deltaSwapSafeguard = _value;
+        emit SetDeltaSwapSafeguard(_value);
     }
 
-    function setCallerFee(uint256 _value) external onlyStrategy {
-        require(_value < 500, "Too high");
-        CALLER_FEE = _value;
-    }
-
-    function setManagerFee(uint256 _value) external onlyStrategy {
-        require(_value < 2000, "Too high");
-        MANAGER_FEE = _value;
+    function setDelayBetweenSwaps(uint256 _value) external onlyOwner {
+        delayBetweenSwaps = _value;
+        emit SetDelayBetweenSwaps(_value);
     }
 
     function getOraclePrice() public view returns (uint256 oraclePrice) {
@@ -239,7 +256,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         view
         returns (uint256 reserveX, uint256 reserveY)
     {
-        (reserveX, reserveY, ) = viewHelper.getReserveForBin(address(pair), bin);
+        (reserveX, reserveY, ) = receiptsManager.getReserveForBin(bin);
     }
 
     function getAllReserves() public view returns (uint256 totalReserveX, uint256 totalReserveY) {
@@ -276,15 +293,13 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         returns (uint256)
     {
         (uint256 totalReserveX, uint256 totalReserveY) = getTotalFunds();
-        uint256 totalDeposits = (totalReserveY + ((totalReserveX * priceX) / 10**18)) *
-            10**(18 - IERC20Metadata(tokenX).decimals());
+        uint256 totalDeposits = (totalReserveY + ((totalReserveX * priceX) / 10**18));
         uint256 totalSupply = totalSupply();
 
-        if (totalSupply * totalDeposits == 0) {
-            return amount * 10**(18 - IERC20Metadata(tokenX).decimals());
+        if (totalSupply == 0 || totalDeposits == 0) {
+            return amount * 10**(18 - IERC20Metadata(tokenX).decimals() + 12);
         }
-        return
-            (amount * 10**(18 - IERC20Metadata(tokenX).decimals()) * totalSupply) / totalDeposits;
+        return (amount * totalSupply) / totalDeposits;
     }
 
     /**
@@ -311,10 +326,10 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     }
 
     /**
-     * @notice Compute max(a_b, 0)
+     * @notice Compute max(a-b, 0)
      * @param a uint256
      * @param b uint256
-     * @return uint256 max(a_b, 0)
+     * @return uint256 max(a-b, 0)
      */
     function _diffOrZero(uint256 a, uint256 b) internal pure returns (uint256) {
         return a > b ? a - b : 0;
@@ -344,37 +359,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         for (uint256 i; i < length; i++) {
             depositedBins[i] = depositedIds.at(i);
         }
-        (uint256 XCollected, uint256 YCollected) = pair.collectFees(address(this), depositedBins);
-        emit Harvest(msg.sender, XCollected, YCollected);
-        if (XCollected > 0) {
-            _handleFee(tokenX, XCollected);
-        }
-        if (YCollected > 0) {
-            _handleFee(tokenY, YCollected);
-        }
-    }
-
-    /**
-     * @notice helper for the harvest function that distributes the fees
-     * @param token to handle
-     * @param collectedAmount to base the fees computation
-     */
-    function _handleFee(address token, uint256 collectedAmount) internal {
-        uint256 callerFee = (collectedAmount * CALLER_FEE) / PRECISION;
-        uint256 managerFee = (collectedAmount * MANAGER_FEE) / PRECISION;
-        uint256 protocolFee = (collectedAmount * PROTOCOL_FEE) / PRECISION;
-        if (callerFee > 0) {
-            IERC20(token).safeTransfer(msg.sender, callerFee);
-            emit FeeDistributed(msg.sender, callerFee, token);
-        }
-        if (managerFee > 0) {
-            IERC20(token).safeTransfer(IStrategy(strategy).manager(), managerFee);
-            emit FeeDistributed(IStrategy(strategy).manager(), managerFee, token);
-        }
-        if (protocolFee > 0) {
-            IERC20(token).safeTransfer(protocolFeeRecipient, protocolFee);
-            emit FeeDistributed(protocolFeeRecipient, protocolFee, token);
-        }
+        receiptsManager.harvest(depositedBins, msg.sender);
     }
 
     /**
@@ -382,21 +367,8 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
      * @param amountX amount of tokenX to deposit
      * @param amountY amount of tokenY to deposit
      */
-    function deposit(uint256 amountX, uint256 amountY) external {
+    function deposit(uint256 amountX, uint256 amountY) external nonReentrant {
         _depositFor(amountX, amountY, msg.sender);
-    }
-
-    /**
-     * @notice deposit for "_for"
-     * @param amountX amount of tokenX to deposit
-     * @param amountY amount of tokenY to deposit
-     */
-    function depositFor(
-        uint256 amountX,
-        uint256 amountY,
-        address _for
-    ) external {
-        _depositFor(amountX, amountY, _for);
     }
 
     /**
@@ -413,23 +385,14 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         harvest(msg.sender);
         uint256 oraclePrice = oracle.getPriceOfXInYUnits(tokenX, tokenY);
         uint256 depositValueY = amountY;
-        uint256 depositValueX = amountX * (oraclePrice / 10**18);
+        uint256 depositValueX = (amountX * oraclePrice) / 10**18;
         uint256 shares = getSharesForDepositTokens(depositValueX + depositValueY, oraclePrice);
         IERC20(tokenX).safeTransferFrom(msg.sender, address(this), amountX);
         IERC20(tokenY).safeTransferFrom(msg.sender, address(this), amountY);
         emit Deposit(_for, amountX, amountY);
+        require(shares > 0, "Cannot mint 0 shares");
         _mint(_for, shares);
         lastDepositedTime[_for] = block.timestamp;
-    }
-
-    /**
-     * @notice Approve token to router
-     * @param token to approve
-     */
-    function _approveTokenIfNeeded(address token) private {
-        if (IERC20(token).allowance(address(this), address(router)) == 0) {
-            IERC20(token).safeApprove(address(router), type(uint256).max);
-        }
     }
 
     /**
@@ -439,9 +402,11 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     function _addLiquidity(ILBRouter.LiquidityParameters memory parameters) internal {
         checkPrice(addLiquidityThreshold);
         //will revert if more than 50 bins
-        (uint256[] memory depositIds, uint256[] memory liquidityMinted) = router.addLiquidity(
-            parameters
-        );
+
+        IERC20(tokenX).safeTransfer(address(receiptsManager), parameters.amountX);
+        IERC20(tokenY).safeTransfer(address(receiptsManager), parameters.amountY);
+
+        uint256[] memory depositIds = receiptsManager.addLiquidity(parameters);
 
         uint256 length = depositIds.length;
         for (uint256 i; i < length; i++) {
@@ -491,8 +456,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         (, , uint256 activeId) = getPairInfos();
         if (respectRatio) {
             (uint256 reserveX, uint256 reserveY) = getTotalReserveForBin(activeId);
-            uint256 ratio = (reserveX * getPriceFromActiveBin()) / reserveY;
-
+            uint256 ratio = (reserveX * getPriceFromActiveBin()) / (reserveY + EPSILON);
             (_deltaIds, _distributionX, _distributionY) = viewHelper
                 .computeDistributionToRespectRatio(
                     (amountX * getPriceFromActiveBin()) / 1e18,
@@ -516,7 +480,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
             deltaIds: _deltaIds,
             distributionX: _distributionX,
             distributionY: _distributionY,
-            to: address(this),
+            to: address(receiptsManager),
             deadline: block.timestamp
         });
         emit LiquidityAdded(_deltaIds, _distributionX, _distributionY, amountX, amountY);
@@ -537,8 +501,11 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         uint256 amountIn,
         uint256 amountOutMin
     ) public onlyStrategy returns (uint256 amountOut) {
+        require(lastSwap + delayBetweenSwaps < block.timestamp);
+        lastSwap = block.timestamp;
         checkSwapStatus(amountIn, _for);
         checkPrice(swapThreshold);
+        (, , uint256 previousId) = getPairInfos();
         require(_for == tokenX || _for == tokenY, "Swap : Bad token");
         address otherToken = _for == tokenX ? tokenY : tokenX;
         address[] memory path = new address[](2);
@@ -554,6 +521,9 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
             address(this),
             block.timestamp
         ); // use the router instead of pair to delegate the handling of minAmount
+        (, , uint256 newId) = getPairInfos();
+        uint256 delta = (newId > previousId) ? (newId - previousId) : (previousId - newId);
+        require(delta < deltaSwapSafeguard, "deltaSwapSafeguard");
         emit SwapToken(otherToken, amountIn, _for, amountOut);
     }
 
@@ -568,16 +538,25 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
         uint256 amountX,
         uint256 amountY,
         bool _harvest
-    ) external {
-        emit Withdraw(msg.sender, amountX, amountY);
+    ) external nonReentrant {
+        _withdraw(amountX, amountY, _harvest);
+    }
+
+    function _withdraw(
+        uint256 amountX,
+        uint256 amountY,
+        bool _harvest
+    ) internal {
+        emit Withdrawal(msg.sender, amountX, amountY);
         if (_harvest) {
             harvest(msg.sender);
         }
         uint256 oraclePrice = oracle.getPriceOfXInYUnits(tokenX, tokenY);
         uint256 neededShares = getSharesForDepositTokens(
-            amountX * (oraclePrice / 10**18) + amountY,
+            (amountX * oraclePrice) / 10**18 + amountY + 1,
             oraclePrice
-        );
+        ) + 1;
+
         _burn(msg.sender, neededShares);
 
         uint256 fee = block.timestamp < lastDepositedTime[msg.sender] + withdrawalFeeDelay
@@ -610,6 +589,33 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     }
 
     /**
+     * @notice Withdraw a certain amount of token X and token Y.
+     * @dev It will first try to withdraw from non-deposited tokens, then from outside bins, and finaly from the active bin.
+     * @param shares the amount of shares to withdraw
+     * @param _harvest if the user wants to harvest fees before withdrawing in order to get the rewards.
+     */
+    function withdrawByShares(uint256 shares, bool _harvest) external nonReentrant {
+        // emit Withdraw(msg.sender, amountX, amountY);
+        if (_harvest) {
+            harvest(msg.sender);
+        }
+        uint256 oraclePrice = oracle.getPriceOfXInYUnits(tokenX, tokenY);
+
+        (uint256 availableAmountX, uint256 availableAmountY) = getTotalFunds();
+
+        uint256 effectiveShares = shares - (getSharesForDepositTokens(1, oraclePrice) + 1);
+        uint256 amountX = (availableAmountX * effectiveShares) / totalSupply();
+        uint256 amountY = (availableAmountY * effectiveShares) / totalSupply();
+        require(
+            getSharesForDepositTokens((amountX * oraclePrice) / 10**18 + amountY + 1, oraclePrice) +
+                1 <=
+                shares
+        );
+
+        _withdraw(amountX, amountY, false);
+    }
+
+    /**
      * @notice Withdraw all liquidity of the vault, only strategist
      */
     function withdrawAllLiquidity() public onlyStrategy {
@@ -619,7 +625,7 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
             uint256[] memory _ids = new uint256[](length);
             for (uint256 i; i < length; i++) {
                 uint256 binNumber = depositedIds.at(i);
-                uint256 binBalance = receiptToken.balanceOf(address(this), binNumber);
+                uint256 binBalance = receiptToken.balanceOf(address(receiptsManager), binNumber);
                 receiptBalances[i] = binBalance;
                 _ids[i] = binNumber;
             }
@@ -655,21 +661,11 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
     }
 
     function _removeLiquidity(uint256[] memory ids, uint256[] memory amounts) internal {
-        router.removeLiquidity(
-            tokenX,
-            tokenY,
-            uint16(binStep),
-            0,
-            0,
-            ids,
-            amounts,
-            address(this),
-            block.timestamp
-        );
+        receiptsManager.removeLiquidity(ids, amounts);
         emit LiquidityRemoved(ids, amounts);
         uint256 length = ids.length;
         for (uint256 i; i < length; i++) {
-            if (receiptToken.balanceOf(address(this), ids[i]) == 0) {
+            if (receiptToken.balanceOf(address(receiptsManager), ids[i]) == 0) {
                 depositedIds.remove(ids[i]);
             }
         }
@@ -690,8 +686,8 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
      * @param amountY amount of token Y to withdraw
      */
     function _withdrawLiquidity(uint256 amountX, uint256 amountY) internal {
-        (uint256 reservesX, uint256 reservesY, uint256 activeId) = getPairInfos();
-        uint256 ratio = (reservesX * PRECISION) / reservesY;
+        (, , uint256 activeId) = getPairInfos();
+        (uint256 reservesX, uint256 reservesY) = getReserveForBin(activeId);
         uint256 sharesFromActive;
         {
             (
@@ -701,33 +697,31 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
             uint256 neededX = _diffOrZero(amountX, reservesXOutsideActive);
             uint256 neededY = _diffOrZero(amountY, reservesYOutsideActive);
             require(
-                (amountX < reservesXOutsideActive + reservesX) &&
-                    (amountY < reservesYOutsideActive + reservesY),
+                (amountX <= reservesXOutsideActive + reservesX) &&
+                    (amountY <= reservesYOutsideActive + reservesY),
                 "Not enough reserves"
             );
 
-            if (neededX + neededY > 0) {
-                if ((neededY * ratio) / PRECISION > neededX) {
+            if (neededX > 0 || neededY > 0) {
+                if (neededY * reservesX > reservesY * neededX) {
                     uint256 amountXObtained;
                     (sharesFromActive, amountXObtained) = viewHelper
-                        .computeWithdrawAmountsFromActiveBin(
+                        ._computeWithdrawAmountsFromActiveBin(
                             0,
                             neededY,
-                            reservesX,
-                            reservesY,
-                            activeId
+                            activeId,
+                            address(receiptsManager)
                         );
                     amountX = _diffOrZero(amountX, amountXObtained);
                     amountY = _diffOrZero(amountY, neededY);
                 } else {
                     uint256 amountYObtained;
                     (sharesFromActive, amountYObtained) = viewHelper
-                        .computeWithdrawAmountsFromActiveBin(
+                        ._computeWithdrawAmountsFromActiveBin(
                             neededX,
                             0,
-                            reservesX,
-                            reservesY,
-                            activeId
+                            activeId,
+                            address(receiptsManager)
                         );
                     amountY = _diffOrZero(amountY, amountYObtained);
                     amountX = _diffOrZero(amountX, neededX);
@@ -770,7 +764,6 @@ contract LBPool is Initializable, ERC20Upgradeable, OwnableUpgradeable, Pausable
                 finalAmounts[i] = finalAmountsX[i - lengthY];
             }
         }
-        emit Log(finalAmountsX, finalAmountsY, idsX, idsY);
         _removeLiquidity(ids, finalAmounts);
         emit LiquidityRemoved(ids, finalAmounts);
     }

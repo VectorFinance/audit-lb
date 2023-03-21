@@ -1,0 +1,127 @@
+
+Issue #01 
+The swap function can eventually be frontrun and used to empty the vault
+
+Remediation
+Added a deltaSwapSafeguard which checks the impact of the swap
+Added an amountOutMin.
+Included a minimumExpectedAmount based on the oracle price, which checks against the amountOutMin inputed.
+
+Issue #02 
+The strategist can steal most of the tokens by swapping over and over
+
+Remediation
+Included a delayBetweenSwaps functionnality
+
+Issue #03 The deltaIds in setParams can be given in any order
+Remediation
+Added a "require(delta > previousId, "Not ascending order");"
+
+Issue #04 Initialization variables can be fetched from vault
+Remediation
+Modified the initialisation to get the values from the vault
+
+Issue #05 Lack of events for setManager and setParams
+Remediation
+Included events
+
+Issue #06 Typographical errors
+Remediation
+Modified the natspec
+
+Issue #07 Governance issues
+Remediation:
+The privileged functions will be reserved to a multisig account
+
+Issue #08 The deposited value X will often round down to 0
+Remediation:
+The operation order was corrected
+
+Issue #09 
+Remediation:
+The ratio of the central bin only is used
+
+Issue #10
+Remediation:
+The function was removed.
+
+Issue #11:
+Remediation:
+The shares have been multiplied by 10e12 on first deposit, to give more precision and avoid described scenario
+
+Issue #12:
+LEFT AS IS
+The following deployments will make sure to include the check
+
+Issue #13:
+Remediation:
+The new ratio has been corrected. While the result may be off by a few wei because of the math rounding properties that do not translate into solidity,
+the computation is merely a help to the manager, hence it is satisfactory
+
+Issue #14:
+Remediation:
+Better rounding up and down has been added
+
+Issue #15:
+Remediation
+A function was added to withdraw by shares
+
+Issue #16:
+LEFT AS IS:
+We are not planning to support them
+
+Issue #17:
+Remediation:
+A new contract is now holding the receipts, hence recieving the fees
+
+Issue #18:
+Remediation:
+NonReentrant has been applied to sensitive functions
+
+Issue #19:
+Remediation:
+Events have been added
+
+Issue #20:
+Remediation:
+The gas optimization have been applied
+
+Issue #21:
+Remediation:
+The typographical corrections have been applied
+
+Issues #22-23:
+Corrected, but please note that the helper is purely informational and never a source of truth for the other contracts
+
+Issue #24 getMaximumWithdrawalTokenXWithoutSwapping and 
+getMaximumWithdrawalTokenYWithoutSwapping do not round up 
+the shares
+
+Remediation
+Rounded shares up in the getMaximalWithdraw function
+
+Issue #25 getReserveForBin, computeAmountsForWithdrawY, 
+computeAmountsForWithdrawX and 
+computeWithdrawAmountsFromActiveBin can only be used by an 
+LBPool contract
+
+Remediation
+Added a secondary function that uses a vault parameters, keeping the same interface with the pool, but enabling other user to interact with the view helper
+
+Issue #26 computeAmountsForWithdrawY and 
+computeAmountsForWithdrawX could revert unexpectedly
+
+Remediation
+If the liquidity is thinned out, users can still withdraw smallers amounts, that will be fulfilled earlier in the for loop.
+Since all withdraws tend to clear out the edges, we don't expect this behaviour to be an issue.
+We did add the non zero check on binReserves.
+
+Issue #27 Gas optimization
+Remediation
+Casted vault as ILBPool
+Eliminated unused parameters
+Changed to "totalSupply == 0 || totalDeposits == 0."
+
+Issue #28
+Remediation
+The oracle has been checked and the proposed advice implemented

@@ -68,9 +68,13 @@ interface ILBPool {
 
     function binStep() external view returns (uint256);
 
+    function receiptsManager() external view returns (address);
+
     function checkPrice(uint256 threshold) external view;
 
     function checkSwapStatus(uint256 amountIn, address _for) external view;
+
+    function receiptsHolder() external view returns (address);
 
     function computeDistributionToRespectRatio(
         uint256 amountX,

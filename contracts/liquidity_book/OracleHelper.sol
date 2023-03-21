@@ -2,6 +2,7 @@
 pragma solidity ^0.8.0;
 
 import "interfaces/AggregatorV3Interface.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract OracleHelper is Ownable {
@@ -30,6 +31,11 @@ contract OracleHelper is Ownable {
     function getPriceOfXInYUnits(address tokenX, address tokenY) external view returns (uint256) {
         uint256 priceXInUsd = getPrice(tokenX);
         uint256 priceYInUsd = getPrice(tokenY);
-        return (priceXInUsd * 10**OUTPUT_DECIMALS) / priceYInUsd;
+
+        require(priceXInUsd >= 0 && priceYInUsd >= 0);
+
+        return
+            (priceXInUsd * 10**(OUTPUT_DECIMALS + IERC20Metadata(tokenY).decimals())) /
+            (priceYInUsd * 10**IERC20Metadata(tokenX).decimals());
     }
 }

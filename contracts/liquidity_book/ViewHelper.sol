@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelinUpgradeable/contracts/proxy/utils/Initializable.sol";
 import "@openzeppelinUpgradeable/contracts/access/OwnableUpgradeable.sol";
 import "@openzeppelinUpgradeable/contracts/security/PausableUpgradeable.sol";
+import "@openzeppelinUpgradeable/contracts/security/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelinUpgradeable/contracts/token/ERC20/ERC20Upgradeable.sol";
 
 import "./../../interfaces/ILBPair.sol";
@@ -44,17 +45,16 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
     function getDepositTokensXForShares(
         uint256 amount,
         uint256 priceX,
-        address vault
+        ILBPool vault
     ) public view returns (uint256 totalAmount, uint256 totalReserveXAvailable) {
-        ILBPool pool = ILBPool(vault);
-        (uint256 totalReserveX, uint256 totalReserveY) = pool.getTotalFunds();
-        uint256 totalDeposits = (((totalReserveY * 10**18) / priceX)) + totalReserveX;
-        uint256 totalSupply = pool.totalSupply();
+        (uint256 totalReserveX, uint256 totalReserveY) = vault.getTotalFunds();
+        uint256 totalDeposits = ((totalReserveX * priceX) / 10**18) + totalReserveY;
+        uint256 totalSupply = vault.totalSupply();
         totalReserveXAvailable = totalReserveX;
-        if (totalSupply * totalDeposits == 0) {
+        if (totalSupply == 0 || totalDeposits == 0) {
             totalAmount = 0;
         } else {
-            totalAmount = (amount * totalDeposits) / totalSupply;
+            totalAmount = (((amount * totalDeposits) / totalSupply) * 10**18) / priceX;
         }
     }
 
@@ -67,28 +67,30 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
     function getDepositTokensYForShares(
         uint256 amount,
         uint256 priceX,
-        address vault
+        ILBPool vault
     ) public view returns (uint256 totalAmount, uint256 totalReserveYAvailable) {
-        ILBPool pool = ILBPool(vault);
-        (uint256 totalReserveX, uint256 totalReserveY) = pool.getTotalFunds();
+        (uint256 totalReserveX, uint256 totalReserveY) = vault.getTotalFunds();
         uint256 totalDeposits = (totalReserveY + ((totalReserveX * priceX) / 10**18));
-        uint256 totalSupply = pool.totalSupply();
+        uint256 totalSupply = vault.totalSupply();
         totalReserveYAvailable = totalReserveY;
-        if (totalSupply * totalDeposits == 0) {
+        if (totalSupply == 0 || totalDeposits == 0) {
             totalAmount = 0;
         } else {
             totalAmount = (amount * totalDeposits) / totalSupply;
         }
     }
 
-    function getMaximumWithdrawalTokenXWithoutSwapping(address vault, address user)
+    function getMaximumWithdrawalTokenXWithoutSwapping(ILBPool vault, address user)
         external
         view
         returns (uint256 finalAmountX, uint256 finalAmountY)
     {
-        ILBPool pool = ILBPool(vault);
-        uint256 shares = pool.balanceOf(user);
-        uint256 priceX = pool.getOraclePrice();
+        uint256 shares = vault.balanceOf(user);
+        if (shares < 2) {
+            return (finalAmountX, finalAmountY);
+        }
+        shares -= 1;
+        uint256 priceX = vault.getOraclePrice();
         (uint256 totalAmountXWithdrawable, uint256 reserveX) = getDepositTokensXForShares(
             shares,
             priceX,
@@ -96,36 +98,105 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
         );
         if (totalAmountXWithdrawable > reserveX) {
             finalAmountX = reserveX;
-            uint256 neededShares = pool.getSharesForDepositTokens(reserveX, priceX);
+            uint256 neededShares = vault.getSharesForDepositTokens(
+                (reserveX * priceX) / 10**18 + 1,
+                priceX
+            ) + 1;
             (finalAmountY, ) = getDepositTokensYForShares(shares - neededShares, priceX, vault);
         } else {
-            finalAmountX = totalAmountXWithdrawable;
+            finalAmountX = totalAmountXWithdrawable - 1;
         }
     }
 
-    function getMaximumWithdrawalTokenYWithoutSwapping(address vault, address user)
+    function getMaximumWithdrawalTokenYWithoutSwapping(ILBPool vault, address user)
         external
         view
         returns (uint256 finalAmountX, uint256 finalAmountY)
     {
-        ILBPool pool = ILBPool(vault);
-        uint256 shares = pool.balanceOf(user);
-        uint256 priceX = pool.getOraclePrice();
+        uint256 shares = vault.balanceOf(user);
+        uint256 priceX = vault.getOraclePrice();
+        uint256 sharesForOneY = vault.getSharesForDepositTokens(1, priceX);
+
+        if (shares < sharesForOneY + 1) {
+            return (finalAmountX, finalAmountY);
+        }
+        shares -= sharesForOneY + 1;
+
         (uint256 totalAmountYWithdrawable, uint256 reserveY) = getDepositTokensYForShares(
             shares,
             priceX,
             vault
         );
-        if (totalAmountYWithdrawable > reserveY) {
+
+        if (reserveY == 0) {
+            (finalAmountX, ) = getDepositTokensXForShares(shares, priceX, vault);
+        } else if (totalAmountYWithdrawable > reserveY) {
             finalAmountY = reserveY;
-            uint256 neededShares = pool.getSharesForDepositTokens(reserveY, priceX);
-            (finalAmountX, ) = getDepositTokensYForShares(shares - neededShares, priceX, vault);
+            uint256 neededShares = vault.getSharesForDepositTokens(finalAmountY, priceX);
+            (finalAmountX, ) = getDepositTokensXForShares(shares - neededShares, priceX, vault);
         } else {
             finalAmountY = totalAmountYWithdrawable;
         }
     }
 
-    function getReserveForBin(address pair, uint256 bin)
+    // function getMaximumWithdrawalTokenYWithoutSwapping(ILBPool vault, address user)
+    //     external
+    //     view
+    //     returns (uint256 finalAmountX, uint256 finalAmountY)
+    // {
+    //     uint256 shares = vault.balanceOf(user);
+    //     if (shares < 2) {
+    //         return (finalAmountX, finalAmountY);
+    //     }
+    //     uint256 priceX = vault.getOraclePrice();
+    //     (uint256 totalAmountYWithdrawable, uint256 reserveY) = getDepositTokensYForShares(
+    //         shares,
+    //         priceX,
+    //         vault
+    //     );
+    //     if (reserveY == 0) {
+    //         (finalAmountX, ) = getDepositTokensXForShares(shares - 2, priceX, vault);
+    //     } else if (totalAmountYWithdrawable > reserveY) {
+    //         finalAmountY = reserveY;
+    //         uint256 neededShares = vault.getSharesForDepositTokens(finalAmountY, priceX) + 1;
+    //         (finalAmountX, ) = getDepositTokensXForShares(shares - neededShares, priceX, vault);
+    //         if (
+    //             finalAmountY > 0 &&
+    //             (vault.getSharesForDepositTokens(
+    //                 (finalAmountX * priceX) / 10**18 + finalAmountY + 1,
+    //                 priceX
+    //             ) >= shares)
+    //         ) {
+    //             finalAmountY -= 1;
+    //         }
+    //     } else {
+    //         if (totalAmountYWithdrawable > 1) {
+    //             finalAmountY = totalAmountYWithdrawable - 2;
+    //         }
+    //     }
+    // }
+
+    function getReserveForBin(
+        address pair,
+        uint256 bin,
+        address vault
+    )
+        public
+        view
+        returns (
+            uint256 reserveX,
+            uint256 reserveY,
+            uint256 receiptBalance
+        )
+    {
+        (reserveX, reserveY, receiptBalance) = _getReserveForBin(pair, bin, vault);
+    }
+
+    function _getReserveForBin(
+        address pair,
+        uint256 bin,
+        address vault
+    )
         public
         view
         returns (
@@ -135,7 +206,7 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
         )
     {
         ILBToken receiptToken = ILBToken(pair);
-        receiptBalance = receiptToken.balanceOf(msg.sender, bin);
+        receiptBalance = receiptToken.balanceOf(vault, bin);
         if (receiptBalance == 0) {
             return (0, 0, 0);
         }
@@ -254,15 +325,28 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
         view
         returns (uint256[] memory finalAmounts, uint256[] memory finalIds)
     {
+        (finalAmounts, finalIds) = _computeAmountsForWithdrawY(amount, ILBPool(msg.sender));
+    }
+
+    /**
+     * @notice Computes the amounts of receipt token and the bins from where to burn them to withdraw amount of the tokenX
+     * @param amount amount of token X to withdraw
+     * @return finalAmounts amounts of receipt token to burn
+     * @return finalIds bins to burn from
+     */
+    function _computeAmountsForWithdrawY(uint256 amount, ILBPool vault)
+        public
+        view
+        returns (uint256[] memory finalAmounts, uint256[] memory finalIds)
+    {
         uint256 reserve;
         ILBToken receiptToken;
         uint256 lowestBin;
         uint256 activeId;
         {
-            ILBPool pool = ILBPool(msg.sender);
-            receiptToken = ILBToken(address(pool.pair()));
-            (, lowestBin) = pool.getHighestAndLowestBin();
-            (, , activeId) = pool.getPairInfos();
+            receiptToken = ILBToken(address(vault.pair()));
+            (, lowestBin) = vault.getHighestAndLowestBin();
+            (, , activeId) = vault.getPairInfos();
         }
         uint256[] memory amounts = new uint256[](activeId - lowestBin);
         uint256[] memory ids = new uint256[](activeId - lowestBin);
@@ -271,9 +355,10 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
         for (uint256 i = lowestBin; i < activeId; i++) {
             (, uint256 binReserve, uint256 receiptTokenAmount) = getReserveForBin(
                 address(receiptToken),
-                i
+                i,
+                vault.receiptsManager()
             );
-            if (receiptTokenAmount > 0) {
+            if (receiptTokenAmount > 0 && binReserve > 0) {
                 if (reserve + binReserve >= amount) {
                     uint256 neededFromBin = amount - reserve;
                     uint256 neededShares = (neededFromBin * receiptTokenAmount) / binReserve;
@@ -307,15 +392,28 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
         view
         returns (uint256[] memory finalAmounts, uint256[] memory finalIds)
     {
+        (finalAmounts, finalIds) = _computeAmountsForWithdrawX(amount, ILBPool(msg.sender));
+    }
+
+    /**
+     * @notice Computes the amounts of receipt token and the bins from where to burn them to withdraw amount of the tokenY
+     * @param amount amount of token Y to withdraw
+     * @return finalAmounts amounts of receipt token to burn
+     * @return finalIds bins to burn from
+     */
+    function _computeAmountsForWithdrawX(uint256 amount, ILBPool vault)
+        public
+        view
+        returns (uint256[] memory finalAmounts, uint256[] memory finalIds)
+    {
         uint256 reserve;
         ILBToken receiptToken;
         uint256 highestBin;
         uint256 activeId;
         {
-            ILBPool pool = ILBPool(msg.sender);
-            receiptToken = ILBToken(address(pool.pair()));
-            (highestBin, ) = pool.getHighestAndLowestBin();
-            (, , activeId) = pool.getPairInfos();
+            receiptToken = ILBToken(address(vault.pair()));
+            (highestBin, ) = vault.getHighestAndLowestBin();
+            (, , activeId) = vault.getPairInfos();
         }
         uint256[] memory amounts = new uint256[](highestBin - activeId);
         uint256[] memory ids = new uint256[](highestBin - activeId);
@@ -324,9 +422,10 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
         for (uint256 i = highestBin; i > activeId; i--) {
             (uint256 binReserve, , uint256 receiptTokenAmount) = getReserveForBin(
                 address(receiptToken),
-                i
+                i,
+                vault.receiptsManager()
             );
-            if (receiptTokenAmount > 0) {
+            if (receiptTokenAmount > 0 && binReserve > 0) {
                 if (reserve + binReserve >= amount) {
                     uint256 neededFromBin = amount - reserve;
                     uint256 neededShares = (neededFromBin * receiptTokenAmount) / binReserve;
@@ -362,16 +461,41 @@ contract ViewHelper is Initializable, OwnableUpgradeable {
     function computeWithdrawAmountsFromActiveBin(
         uint256 amountX,
         uint256 amountY,
-        uint256 reservesX,
-        uint256 reservesY,
         uint256 activeId
     ) public view returns (uint256 finalAmount, uint256 amountOtherToken) {
-        ILBPool pool = ILBPool(msg.sender);
-        address pair = address(pool.pair());
+        (finalAmount, amountOtherToken) = _computeWithdrawAmountsFromActiveBin(
+            amountX,
+            amountY,
+            activeId,
+            ILBPool(msg.sender)
+        );
+    }
+
+    /**
+     * @notice Computes the amount to be withdrawn from active Bin. One of the tokens is implicitely calculated and thus must be 0.
+     * @dev The returned amount is for the token that is automatically handeld
+     * @dev amountX * amountY == 0
+     * @param amountX amount of token X to withdraw
+     * @param amountY amount of token Y to withdraw
+     * @param activeId id of the active bin
+     * @return finalAmount amounts of receipt token to burn
+     * @return amountOtherToken amount of token that will be withdrawn
+     */
+    function _computeWithdrawAmountsFromActiveBin(
+        uint256 amountX,
+        uint256 amountY,
+        uint256 activeId,
+        ILBPool vault
+    ) public view returns (uint256 finalAmount, uint256 amountOtherToken) {
+        address pair = address(vault.pair());
         ILBToken receiptToken = ILBToken(pair);
-        (uint256 binReserveX, uint256 binReserveY, ) = getReserveForBin(pair, activeId);
+        (uint256 binReserveX, uint256 binReserveY, ) = getReserveForBin(
+            pair,
+            activeId,
+            address(vault)
+        );
         require(amountX == 0 || amountY == 0, "One must be 0");
-        uint256 binSupply = receiptToken.balanceOf(msg.sender, activeId);
+        uint256 binSupply = receiptToken.balanceOf(address(vault), activeId);
         if (amountX > 0) {
             finalAmount = (amountX * binSupply) / binReserveX;
             amountOtherToken = (binReserveY * finalAmount) / binSupply;
